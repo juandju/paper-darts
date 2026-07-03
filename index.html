@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Paper Darts</title>
+<style>
+  html,body{margin:0;height:100%;background:#3d2f22;display:flex;align-items:center;justify-content:center;font-family:"Comic Sans MS","Chalkboard SE","Marker Felt",cursive;}
+  canvas{background:#f1e3c3;box-shadow:0 12px 34px rgba(0,0,0,.45);border-radius:8px;touch-action:none;max-height:98vh;max-width:98vw;}
+</style>
+</head>
+<body>
+<canvas id="game" width="480" height="1040"></canvas>
+<script>
+const BUILD = 'v1.2';   // visible stamp to verify which build is running
+const cv = document.getElementById('game');
+const g = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const FLOORY = H - 64;      // fruit that gets this far past him splats
+const GROUND = FLOORY + 12;
+const NX = W/2, NY = H - 90;// the ninja runs in place at the bottom edge
+const BOWR = 55;            // the bow pivots close to his body
+const DRAW = BOWR - 12;     // full pull brings the nock right back to his chest
+const ALEN   = 95;          // arrow length, tip to nock
+
+const rnd   = (a,b)=>a+Math.random()*(b-a);
+const clamp = (v,a,b)=>v<a?a:v>b?b:v;
+const segDist = (px,py,ax,ay,bx,by)=>{   // point-to-segment distance
+  const dx=bx-ax, dy=by-ay, l2=dx*dx+dy*dy;
+  const t = l2 ? clamp(((px-ax)*dx+(py-ay)*dy)/l2, 0, 1) : 0;
+  return Math.hypot(px-(ax+dx*t), py-(ay+dy*t));
+};
+
+const TYPES = ['apple','orange','lemon','melon','plum'];
+const RAD   = {apple:22, orange:21, lemon:20, melon:26, plum:16};
+const COLOR = {apple:'#e05d4f', orange:'#f2a24b', lemon:'#f2d54b', melon:'#e05d4f', plum:'#9b6bb3'};
+
+let state, fruits, arrows, pops, bits, splats, booms, bow, spawnT, shotsFired, started;
+let floorScroll = 0;   // how far the dojo floor has slid past under the running ninja
+let shake = 0;         // screen shake from fruit detonations
+
+// haptics: Capacitor native plugin on iOS, vibration API elsewhere, no-op in plain browsers
+const HapticsPlugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Haptics;
+function buzz(style){
+  if(HapticsPlugin) HapticsPlugin.impact({style}).catch(()=>{});
+  else if(navigator.vibrate) navigator.vibrate(style==='HEAVY' ? 30 : 15);
+}
+
+function reset(){
+  state = {score:0, best:+(localStorage.pd_best||0), lives:5, over:false};
+  fruits=[]; arrows=[]; pops=[]; bits=[]; splats=[]; booms=[];
+  shake = 0;
+  bow = {ang:-Math.PI/2, pull:0, aiming:false};
+  spawnT = 400; shotsFired = 0;
+  started = false;   // fruit waits for the first touch
+}
+reset();
+
+/* ---------------- spawning ---------------- */
+function spawnFruit(){
+  const type = TYPES[Math.floor(Math.random()*TYPES.length)];
+  fruits.push({
+    type, r:RAD[type],
+    x: rnd(46, W-46), y: -40,
+    vx: rnd(-0.5,0.5), vy: rnd(0.9,1.5) + Math.min(1.2, state.score/400),
+    rot: rnd(-0.4,0.4), vr: rnd(-0.02,0.02),
+    skewered:false, dead:false
+  });
+}
+
+/* ---------------- input ---------------- */
+function ptr(e){
+  const r = cv.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*W/r.width, y:(e.clientY-r.top)*H/r.height};
+}
+function setAim(p){
+  // aim from the drag vector: pulling back in a direction fires the opposite way
+  const dx = p.x - bow.sx, dy = p.y - bow.sy;
+  const d = Math.hypot(dx, dy);
+  if(d > 10){
+    let ang = Math.atan2(-dy, -dx);
+    if(ang > 0) ang = ang > Math.PI/2 ? -Math.PI+0.35 : -0.35;   // keep shots in the upward cone
+    else ang = clamp(ang, -Math.PI+0.35, -0.35);
+    bow.ang = ang;
+  }
+  bow.pull = clamp((d-20)/150, 0, 1);
+}
+cv.addEventListener('pointerdown', e=>{
+  if(state.over){ reset(); return; }
+  started = true;
+  const p = ptr(e);
+  bow.sx = p.x; bow.sy = p.y;   // drag starts wherever the finger lands
+  bow.aiming = true;
+  bow.pull = 0;
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e=>{
+  if(!bow.aiming) return;
+  setAim(ptr(e));
+});
+function release(){
+  if(!bow.aiming) return;
+  if(bow.pull > 0.12){
+    const sp = 20;                       // every arrow flies at the same speed
+    const dx = Math.cos(bow.ang), dy = Math.sin(bow.ang);
+    const nockR = BOWR - bow.pull*DRAW;
+    arrows.push({x:NX+dx*(nockR+ALEN), y:NY+dy*(nockR+ALEN),
+                 vx:dx*sp, vy:dy*sp, ang:bow.ang, stuck:[], nextOff:30});
+    shotsFired++;
+  }
+  bow.aiming = false; bow.pull = 0;
+}
+cv.addEventListener('pointerup', release);
+cv.addEventListener('pointercancel', release);
+
+/* ---------------- update ---------------- */
+function update(k, dt){
+  if(!started) return;
+  spawnT -= dt;
+  if(spawnT <= 0){
+    spawnFruit();
+    spawnT = Math.max(560, 1150 - state.score*1.4) * rnd(0.8, 1.2);
+  }
+
+  // falling fruit
+  for(const f of fruits){
+    if(f.skewered || f.dead) continue;
+    f.vy += 0.02*k;
+    f.y  += f.vy*k;
+    f.x  += f.vx*k;
+    f.rot+= f.vr*k;
+    if(f.x < f.r || f.x > W-f.r) f.vx *= -1;
+    if(f.y >= GROUND - f.r*0.4){          // splat!
+      f.dead = true;
+      splats.push({x:f.x, y:GROUND+5, r:f.r, c:COLOR[f.type], t:0});
+      state.lives--;
+      if(state.lives <= 0){
+        state.over = true;
+        if(state.score > state.best){ state.best = state.score; localStorage.pd_best = state.best; }
+      }
+    }
+  }
+
+  // arrows
+  for(const a of arrows){
+    if(a.state === 'stuck'){               // embedded in the border, twanging then fading
+      a.stuckT += dt;
+      if(a.stuckT > 1500) a.done = true;
+      continue;
+    }
+    const px = a.x, py = a.y;              // tip position before moving
+    a.x  += a.vx*k;                        // no gravity — arrows fly dead straight
+    a.y  += a.vy*k;
+    a.ang = Math.atan2(a.vy, a.vx);
+
+    for(const f of fruits){
+      if(f.skewered || f.dead) continue;
+      if(segDist(f.x, f.y, px, py, a.x, a.y) <= f.r + 3){
+        f.skewered = true;
+        buzz(f.type === 'melon' ? 'HEAVY' : 'MEDIUM');
+        const target = Math.min(a.nextOff + f.r, ALEN - 14);
+        a.nextOff = target + f.r*0.9;
+        a.stuck.push({f, off: 6, target});
+      }
+    }
+
+    // stuck fruit slides down the shaft to its slot, then rides along
+    const dxa = Math.cos(a.ang), dya = Math.sin(a.ang);
+    for(const s of a.stuck){
+      s.off += (s.target - s.off)*0.25*k;
+      s.f.x = a.x - dxa*s.off;
+      s.f.y = a.y - dya*s.off;
+      s.f.rot *= 0.9;
+    }
+
+    // tip reaches the border: the arrow thunks in and stays, and its cargo detonates
+    if(a.y <= 2 || a.x <= 18 || a.x >= W-18){
+      if(a.y <= 2) a.y = 2;
+      if(a.x <= 18) a.x = 14; else if(a.x >= W-18) a.x = W-14;
+      a.state = 'stuck'; a.stuckT = 0;
+      const n = a.stuck.length;
+      if(n > 0){
+        const pts = n*n*10;
+        state.score += pts;
+        if(state.score > state.best){ state.best = state.score; localStorage.pd_best = state.best; }
+        pops.push({x:clamp(a.x,70,W-70), y:clamp(a.y+46,150,H-160), txt:'+'+pts, sub:n>1? n+' combo!':'', t:0});
+        buzz('HEAVY');
+        shake += 5 + n*3;
+        for(const s of a.stuck){
+          const f = s.f;
+          booms.push({x:f.x, y:f.y, t:0, c:COLOR[f.type], rmax:46 + f.r});
+          for(let i=0;i<14;i++){
+            const an = rnd(0,6.28), sp = rnd(1.5,6.5);
+            bits.push({x:f.x, y:f.y, vx:Math.cos(an)*sp, vy:Math.sin(an)*sp + rnd(0,1.5),
+                       c: Math.random()<0.7 ? COLOR[f.type] : '#fdf4dd',
+                       rot:rnd(0,6), vr:rnd(-0.3,0.3), t:0, sz:rnd(3,9)});
+          }
+          f.dead = true;
+        }
+      }
+      a.stuck.length = 0;
+    }
+  }
+
+  arrows = arrows.filter(a=>!a.done);
+  fruits = fruits.filter(f=>!f.dead);
+
+  for(const p of pops){ p.t += dt; p.y -= 0.35*k; }
+  pops = pops.filter(p=>p.t < 1000);
+  for(const b of bits){ b.vy += 0.08*k; b.x += b.vx*k; b.y += b.vy*k; b.rot += b.vr*k; b.t += dt; }
+  bits = bits.filter(b=>b.y < H && b.t < 2000);
+  for(const s of splats) s.t += dt;
+  splats = splats.filter(s=>s.t < 5000);
+  for(const b of booms) b.t += dt;
+  booms = booms.filter(b=>b.t < 550);
+}
+
+/* ---------------- drawing ---------------- */
+function drawFruit(f){
+  // altitude: fruit spawns high (near the overhead camera) and sinks to the floor
+  const z = f.skewered ? 0 : clamp((GROUND - f.y)/(GROUND + 40), 0, 1);
+  const sc = 1 + z*0.45;               // nearer the camera = bigger
+  // floor shadow trails behind while airborne, converging underneath at landing
+  g.fillStyle = `rgba(50,32,14,${0.22 - z*0.12})`;
+  g.beginPath();
+  g.ellipse(f.x + 4 + z*26, f.y + 8 + z*40, f.r*(1.05 - z*0.35), f.r*(0.9 - z*0.3), 0, 0, 7);
+  g.fill();
+
+  g.save();
+  g.translate(f.x, f.y);
+  g.scale(sc, sc);
+  g.rotate(f.rot);
+  const r = f.r;
+  const grad = (rr,c1,c2)=>{       // sphere shading, lit from the upper-left
+    const gr = g.createRadialGradient(-rr*0.4, -rr*0.45, rr*0.15, 0, 0, rr*1.1);
+    gr.addColorStop(0, c1); gr.addColorStop(1, c2);
+    return gr;
+  };
+  g.lineWidth = 2.5;
+  g.strokeStyle = 'rgba(60,40,25,.25)';
+  switch(f.type){
+    case 'apple':
+      g.fillStyle = grad(r, '#f28274', '#c23b2e');
+      g.beginPath(); g.arc(0,0,r,0,7); g.fill(); g.stroke();
+      g.strokeStyle = '#7a5230'; g.lineWidth = 4;
+      g.beginPath(); g.moveTo(0,-r+4); g.lineTo(3,-r-8); g.stroke();
+      g.fillStyle = '#79b04a';
+      g.beginPath(); g.ellipse(9,-r-4,8,4,0.5,0,7); g.fill();
+      g.fillStyle = 'rgba(255,255,255,.35)';
+      g.beginPath(); g.arc(-r*0.35,-r*0.35,r*0.24,0,7); g.fill();
+      break;
+    case 'orange':
+      g.fillStyle = grad(r, '#ffbf69', '#d9821e');
+      g.beginPath(); g.arc(0,0,r,0,7); g.fill(); g.stroke();
+      g.fillStyle = 'rgba(140,80,20,.18)';
+      for(let i=0;i<6;i++){
+        const an = i*1.05+0.4;
+        g.beginPath(); g.arc(Math.cos(an)*r*0.55, Math.sin(an)*r*0.55, 2, 0, 7); g.fill();
+      }
+      g.fillStyle = '#79b04a';
+      g.beginPath(); g.ellipse(0,-r+2,5,3,0,0,7); g.fill();
+      g.fillStyle = 'rgba(255,255,255,.3)';
+      g.beginPath(); g.arc(-r*0.35,-r*0.35,r*0.22,0,7); g.fill();
+      break;
+    case 'lemon':
+      g.fillStyle = grad(r*1.15, '#f9e376', '#d4aa2c');
+      g.beginPath(); g.ellipse(0,0,r*1.15,r*0.78,0,0,7); g.fill(); g.stroke();
+      g.fillStyle = '#e7c33f';
+      g.beginPath(); g.arc(-r*1.12,0,4,0,7); g.fill();
+      g.beginPath(); g.arc(r*1.12,0,4,0,7); g.fill();
+      g.fillStyle = 'rgba(255,255,255,.4)';
+      g.beginPath(); g.ellipse(-r*0.35,-r*0.25,r*0.3,r*0.16,-0.4,0,7); g.fill();
+      break;
+    case 'melon':
+      g.fillStyle = grad(r, '#4fae5e', '#2c7d3b');
+      g.beginPath(); g.arc(0,0,r,0,Math.PI); g.closePath(); g.fill(); g.stroke();
+      g.fillStyle = '#eef4dc';
+      g.beginPath(); g.arc(0,0,r-5,0,Math.PI); g.closePath(); g.fill();
+      g.fillStyle = grad(r-8, '#f0796a', '#c74236');
+      g.beginPath(); g.arc(0,0,r-8,0,Math.PI); g.closePath(); g.fill();
+      g.fillStyle = '#40321f';
+      for(const an of [0.6, 1.2, 1.9, 2.5]){
+        g.beginPath();
+        g.ellipse(Math.cos(an)*r*0.45, Math.sin(an)*r*0.45, 2.4, 3.6, an, 0, 7);
+        g.fill();
+      }
+      break;
+    case 'plum':
+      g.fillStyle = grad(r, '#b98fd0', '#6f4390');
+      g.beginPath(); g.arc(0,0,r,0,7); g.fill(); g.stroke();
+      g.strokeStyle = '#7a5230'; g.lineWidth = 3;
+      g.beginPath(); g.moveTo(0,-r+3); g.lineTo(-2,-r-6); g.stroke();
+      g.fillStyle = 'rgba(255,255,255,.35)';
+      g.beginPath(); g.arc(-r*0.35,-r*0.35,r*0.24,0,7); g.fill();
+      break;
+  }
+  g.restore();
+}
+
+function arrowShaftLocal(){
+  // tip at (0,0), slim shaft trailing to (0,ALEN) in local space
+  g.strokeStyle = 'rgba(70,55,30,.12)'; g.lineWidth = 3.5; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(3, 12); g.lineTo(3, ALEN+4); g.stroke();
+  g.strokeStyle = '#c69a5e'; g.lineWidth = 3.5;
+  g.beginPath(); g.moveTo(0, 8); g.lineTo(0, ALEN); g.stroke();
+  g.strokeStyle = 'rgba(255,240,210,.35)'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(-1, 10); g.lineTo(-1, ALEN-2); g.stroke();
+  // fletching
+  g.fillStyle = '#e05d4f';
+  g.strokeStyle = 'rgba(60,40,25,.3)'; g.lineWidth = 1.2;
+  g.beginPath();
+  g.moveTo(-1.5, ALEN-20); g.lineTo(-8, ALEN-13); g.lineTo(-8, ALEN+1); g.lineTo(-1.5, ALEN-6);
+  g.closePath(); g.fill(); g.stroke();
+  g.beginPath();
+  g.moveTo(1.5, ALEN-20); g.lineTo(8, ALEN-13); g.lineTo(8, ALEN+1); g.lineTo(1.5, ALEN-6);
+  g.closePath(); g.fill(); g.stroke();
+}
+function arrowTipLocal(){
+  g.fillStyle = '#8b8e96';
+  g.strokeStyle = 'rgba(40,40,45,.4)'; g.lineWidth = 1.2;
+  g.beginPath(); g.moveTo(0,0); g.lineTo(-5.5,13); g.lineTo(5.5,13);
+  g.closePath(); g.fill(); g.stroke();
+  g.fillStyle = 'rgba(255,255,255,.25)';   // struck-metal glint on one face
+  g.beginPath(); g.moveTo(0,1.5); g.lineTo(-3.5,11); g.lineTo(0,11);
+  g.closePath(); g.fill();
+}
+function drawArrow(x, y, ang, stuck){
+  const rot = ang + Math.PI/2;   // local "up" becomes the direction of travel
+  g.save(); g.translate(x,y); g.rotate(rot); arrowShaftLocal(); g.restore();
+  if(stuck) for(const s of stuck) drawFruit(s.f);   // fruit rides the shaft
+  g.save(); g.translate(x,y); g.rotate(rot); arrowTipLocal(); g.restore();
+}
+
+function shadeEllipse(x, y, rx, ry, c1, c2){
+  // light comes from the upper-left, giving each form a rounded top
+  const gr = g.createRadialGradient(x-rx*0.4, y-ry*0.5, Math.min(rx,ry)*0.2, x, y, Math.max(rx,ry)*1.15);
+  gr.addColorStop(0, c1); gr.addColorStop(1, c2);
+  g.fillStyle = gr;
+  g.beginPath(); g.ellipse(x, y, rx, ry, 0, 0, 7); g.fill();
+}
+function arm(ax, ay, bx, by){
+  g.strokeStyle = '#222839'; g.lineWidth = 7;
+  g.beginPath(); g.moveTo(ax,ay); g.lineTo(bx,by); g.stroke();
+  g.strokeStyle = '#3d4664'; g.lineWidth = 3;   // lit core makes the limb read as a cylinder
+  g.beginPath(); g.moveTo(ax,ay); g.lineTo(bx,by); g.stroke();
+}
+function hand(x, y){
+  g.fillStyle = '#d9b08c';
+  g.strokeStyle = 'rgba(60,35,20,.5)'; g.lineWidth = 1.2;
+  g.beginPath(); g.arc(x, y, 3.6, 0, 7); g.fill(); g.stroke();
+}
+
+function drawNinja(t){
+  const pull = bow.pull;
+  const nockR = BOWR - pull*DRAW;        // his hand drags the nock back to his chest
+  const rot = bow.ang + Math.PI/2;       // whole body turns to face the shot
+  const phase = t/85;
+  const runA = Math.sin(phase);          // stride cycle — he never stops running
+  const fl = Math.sin(t/120)*5;
+
+  // aim dots out along the shot line (world space)
+  if(bow.aiming && pull > 0.05){
+    const dx = Math.cos(bow.ang), dy = Math.sin(bow.ang);
+    const tipD = nockR + ALEN + 14;
+    g.fillStyle = `rgba(253,244,221,${0.15+0.35*pull})`;
+    for(let i=1;i<=9;i++){
+      g.beginPath(); g.arc(NX+dx*(tipD+i*48), NY+dy*(tipD+i*48), 3.5, 0, 7); g.fill();
+    }
+  }
+
+  g.save(); g.translate(NX, NY); g.rotate(rot);
+  g.lineCap = 'round';
+
+  // soft grounded shadow, tighter core
+  g.fillStyle = 'rgba(40,25,10,.16)';
+  g.beginPath(); g.ellipse(5, 8, 26, 20, 0, 0, 7); g.fill();
+  g.fillStyle = 'rgba(40,25,10,.2)';
+  g.beginPath(); g.ellipse(2, 4, 18, 14, 0, 0, 7); g.fill();
+
+  // headband tails trailing behind him
+  g.strokeStyle = '#c94f4a'; g.lineWidth = 3;
+  g.beginPath(); g.moveTo(-2, 8); g.quadraticCurveTo(-7, 20-fl, -5, 32+fl); g.stroke();
+  g.beginPath(); g.moveTo(2, 8); g.quadraticCurveTo(8, 18+fl, 7, 30-fl); g.stroke();
+
+  // feet kicking out behind on each stride
+  for(const [fx,fy] of [[-9, 11+runA*10], [9, 11-runA*10]]){
+    shadeEllipse(fx, fy, 6, 8, '#333c56', '#161b28');
+  }
+
+  // arms: left hand grabs the bow grip, right hand rides the string even at rest
+  arm(-11, -2, -2, -BOWR-14);
+  arm(11, -2, 3, -nockR);
+
+  // body built from stacked shaded forms: hips, shoulders, hooded head
+  shadeEllipse(0, 3, 15, 12, '#39425f', '#1c2233');
+  shadeEllipse(0, -1, 16, 13, '#434e70', '#232a40');
+  shadeEllipse(0, -4, 11, 11, '#4d5980', '#20263a');
+  // hood seam and a soft specular on the crown
+  g.strokeStyle = 'rgba(255,255,255,.10)'; g.lineWidth = 2;
+  g.beginPath(); g.arc(0, -4, 7.5, -2.6, -0.4); g.stroke();
+  g.fillStyle = 'rgba(255,255,255,.16)';
+  g.beginPath(); g.ellipse(-4, -8, 3.4, 2.2, -0.6, 0, 7); g.fill();
+  // headband knot at the back of his head
+  shadeEllipse(0, 6, 4.2, 3.6, '#e06a60', '#9e3a36');
+
+  // nocked arrow, then string, limbs and grip on the pivot radius
+  g.save(); g.translate(0, -(nockR+ALEN)); arrowShaftLocal(); arrowTipLocal(); g.restore();
+  g.strokeStyle = '#6b6257'; g.lineWidth = 2;
+  g.beginPath();
+  g.moveTo(-56, -BOWR+4); g.lineTo(0, -nockR); g.lineTo(56, -BOWR+4);
+  g.stroke();
+  // bow limbs: dark wood with a lit ridge down the middle
+  g.strokeStyle = '#5d3a1e'; g.lineWidth = 9;
+  g.beginPath();
+  g.moveTo(-56, -BOWR+4);
+  g.quadraticCurveTo(0, -BOWR-34, 56, -BOWR+4);
+  g.stroke();
+  g.strokeStyle = '#9c6a3c'; g.lineWidth = 4;
+  g.beginPath();
+  g.moveTo(-56, -BOWR+4);
+  g.quadraticCurveTo(0, -BOWR-34, 56, -BOWR+4);
+  g.stroke();
+  g.strokeStyle = '#402913'; g.lineWidth = 10;
+  g.beginPath(); g.moveTo(-8, -BOWR-15); g.lineTo(8, -BOWR-15); g.stroke();
+
+  // hands on top so he's actually gripping it
+  hand(-2, -BOWR-14);
+  hand(3, -nockR);
+
+  g.restore();
+}
+
+function heart(x, y, s, filled){
+  g.save(); g.translate(x,y); g.scale(s,s);
+  g.beginPath();
+  g.moveTo(0,4);
+  g.bezierCurveTo(-7,-2,-4,-9,0,-4.5);
+  g.bezierCurveTo(4,-9,7,-2,0,4);
+  g.closePath();
+  if(filled){ g.fillStyle = '#e05d4f'; g.fill(); }
+  g.strokeStyle = 'rgba(60,40,25,.4)'; g.lineWidth = 0.9; g.stroke();
+  g.restore();
+}
+
+function render(){
+  g.save();
+  if(shake > 0.3) g.translate(rnd(-shake,shake), rnd(-shake,shake));
+  // top-down dojo floor: long vertical boards, end-seams scroll as the ninja runs
+  const CW = 68, LEN = 170;   // board width / board length
+  g.fillStyle = '#b3854e';
+  g.fillRect(0,0,W,H);
+  for(let c=0; c*CW<W; c++){
+    if(c%2){ g.fillStyle = 'rgba(0,0,0,.045)'; g.fillRect(c*CW, 0, CW, H); }
+  }
+  // beveled seams: a dark groove with a lit edge beside it
+  for(let x=0; x<=W; x+=CW){
+    g.strokeStyle = 'rgba(80,50,20,.35)'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(x,0); g.lineTo(x,H); g.stroke();
+    g.strokeStyle = 'rgba(255,235,190,.10)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x+1.5,0); g.lineTo(x+1.5,H); g.stroke();
+  }
+  for(let c=0; c*CW<W; c++){
+    const off = (c*97) % LEN;
+    for(let y = ((floorScroll + off) % LEN) - LEN; y < H; y += LEN){
+      g.strokeStyle = 'rgba(80,50,20,.35)'; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(c*CW, y); g.lineTo((c+1)*CW, y); g.stroke();
+      g.strokeStyle = 'rgba(255,235,190,.10)'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(c*CW, y+1.5); g.lineTo((c+1)*CW, y+1.5); g.stroke();
+    }
+  }
+  // wall tops at the sides, seen from above — with shadows they cast onto the floor
+  g.fillStyle = '#6e4726'; g.fillRect(0,0,16,H); g.fillRect(W-16,0,16,H);
+  g.fillStyle = 'rgba(0,0,0,.18)'; g.fillRect(16,0,4,H); g.fillRect(W-20,0,4,H);
+  let ao = g.createLinearGradient(20,0,54,0);
+  ao.addColorStop(0,'rgba(25,14,5,.30)'); ao.addColorStop(1,'rgba(25,14,5,0)');
+  g.fillStyle = ao; g.fillRect(20,0,34,H);
+  ao = g.createLinearGradient(W-20,0,W-54,0);
+  ao.addColorStop(0,'rgba(25,14,5,.30)'); ao.addColorStop(1,'rgba(25,14,5,0)');
+  g.fillStyle = ao; g.fillRect(W-54,0,34,H);
+  g.fillStyle = 'rgba(255,225,170,.12)'; g.fillRect(0,0,3,H); g.fillRect(W-16,0,3,H);
+
+  // splat marks on the floorboards (round from above, sliding by with the floor)
+  for(const s of splats){
+    g.globalAlpha = Math.max(0, 1 - s.t/5000)*0.8;
+    g.fillStyle = s.c;
+    g.beginPath(); g.ellipse(s.x, s.y, s.r*1.3, s.r*1.05, 0.3, 0, 7); g.fill();
+    g.beginPath();
+    g.arc(s.x - s.r*1.5, s.y-4, 4, 0, 7);
+    g.arc(s.x + s.r*1.4, s.y+6, 3, 0, 7);
+    g.arc(s.x + s.r*0.6, s.y - s.r*1.5, 3.5, 0, 7);
+    g.fill();
+    g.globalAlpha = 1;
+  }
+
+  // free-falling fruit
+  for(const f of fruits) if(!f.skewered) drawFruit(f);
+
+  // flying arrows (+ their kebabs)
+  for(const a of arrows){
+    if(a.state === 'stuck'){
+      // twang on impact, then fade out of the wall
+      const wob = Math.sin(a.stuckT/36) * 0.09 * Math.max(0, 1 - a.stuckT/500);
+      g.globalAlpha = a.stuckT > 900 ? Math.max(0, 1 - (a.stuckT-900)/600) : 1;
+      drawArrow(a.x, a.y, a.ang + wob, null);
+      g.globalAlpha = 1;
+    } else {
+      drawArrow(a.x, a.y, a.ang, a.stuck);
+    }
+  }
+
+  drawNinja(performance.now());
+
+  // confetti
+  for(const b of bits){
+    const sz = b.sz || 8;
+    g.save(); g.translate(b.x, b.y); g.rotate(b.rot);
+    g.fillStyle = b.c; g.fillRect(-sz/2, -sz/2, sz, sz);
+    g.restore();
+  }
+
+  // soft light pool over the dojo — darkens toward the edges
+  const vg = g.createRadialGradient(W/2, H*0.45, H*0.28, W/2, H*0.5, H*0.78);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(25,14,5,.20)');
+  g.fillStyle = vg;
+  g.fillRect(0,0,W,H);
+
+  // fruit detonations: a white flash, an expanding juice ring, a fading core
+  for(const b of booms){
+    const p = b.t/550;
+    if(b.t < 130){
+      g.globalAlpha = (1 - b.t/130)*0.85;
+      g.fillStyle = '#fff7e0';
+      g.beginPath(); g.arc(b.x, b.y, 12 + (b.t/130)*26, 0, 7); g.fill();
+    }
+    g.globalAlpha = (1-p)*0.9;
+    g.strokeStyle = b.c; g.lineWidth = 7*(1-p) + 1;
+    g.beginPath(); g.arc(b.x, b.y, 14 + p*b.rmax, 0, 7); g.stroke();
+    g.globalAlpha = (1-p)*0.5;
+    g.fillStyle = b.c;
+    g.beginPath(); g.arc(b.x, b.y, 8 + p*b.rmax*0.55, 0, 7); g.fill();
+    g.globalAlpha = 1;
+  }
+
+  // score popups
+  for(const p of pops){
+    g.globalAlpha = Math.max(0, 1 - p.t/1000);
+    g.fillStyle = '#fdf4dd'; g.textAlign = 'center';
+    g.font = 'bold 30px "Comic Sans MS","Chalkboard SE",cursive';
+    g.fillText(p.txt, p.x, p.y);
+    if(p.sub){
+      g.fillStyle = '#e05d4f';
+      g.font = 'bold 20px "Comic Sans MS","Chalkboard SE",cursive';
+      g.fillText(p.sub, p.x, p.y+24);
+    }
+    g.globalAlpha = 1;
+  }
+
+  // HUD
+  // HUD sits below the phone's status bar / notch area
+  g.fillStyle = '#fdf4dd'; g.textAlign = 'left';
+  g.font = 'bold 34px "Comic Sans MS","Chalkboard SE",cursive';
+  g.fillText(state.score, 16, 112);
+  g.font = '15px "Comic Sans MS","Chalkboard SE",cursive';
+  g.fillText('best ' + state.best, 16, 134);
+  g.fillStyle = 'rgba(253,244,221,.5)';
+  g.font = '12px "Comic Sans MS","Chalkboard SE",cursive';
+  g.fillText(BUILD, 16, H - 14);
+  for(let i=0;i<5;i++) heart(W-24 - i*28, 100, 2.2, i < state.lives);
+
+  if(shotsFired === 0 && !state.over){
+    g.fillStyle = 'rgba(253,244,221,.92)'; g.textAlign = 'center';
+    g.font = 'bold 22px "Comic Sans MS","Chalkboard SE",cursive';
+    const bob = Math.sin(performance.now()/300)*4;
+    g.fillText('pull back & release!', W/2, NY - 240 + bob);
+    g.font = 'bold 26px "Comic Sans MS","Chalkboard SE",cursive';
+    g.fillText('PAPER DARTS', W/2, 178);
+  }
+
+  if(state.over){
+    g.fillStyle = 'rgba(50,40,30,.55)';
+    g.fillRect(0,0,W,H);
+    g.fillStyle = '#f7f1e3';
+    g.save();
+    g.translate(W/2, H/2); g.rotate(-0.02);
+    g.fillRect(-160,-110,320,220);
+    g.strokeStyle = 'rgba(120,95,50,.4)'; g.lineWidth = 3;
+    g.strokeRect(-160,-110,320,220);
+    g.fillStyle = '#5b4636'; g.textAlign = 'center';
+    g.font = 'bold 34px "Comic Sans MS","Chalkboard SE",cursive';
+    g.fillText('GAME OVER', 0, -52);
+    g.font = 'bold 28px "Comic Sans MS","Chalkboard SE",cursive';
+    g.fillText('score  ' + state.score, 0, 0);
+    g.font = '20px "Comic Sans MS","Chalkboard SE",cursive';
+    g.fillText('best  ' + state.best, 0, 32);
+    g.fillStyle = '#e05d4f';
+    g.fillText('tap to play again', 0, 82);
+    g.restore();
+  }
+
+  g.restore();   // close the screen-shake transform
+}
+
+/* ---------------- main loop ---------------- */
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(34, now - last); last = now;
+  const k = dt / 16.667;
+  shake *= Math.pow(0.86, k);
+  if(!state.over) update(k, dt);
+  if(!state.over){
+    const slide = 0.14*dt;         // the floor never stops sliding under him
+    floorScroll += slide;
+    for(const s of splats) s.y += slide;
+  }
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
