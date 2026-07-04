@@ -12,13 +12,14 @@
 <body>
 <canvas id="game" width="480" height="1040"></canvas>
 <script>
-const BUILD = 'v1.2';   // visible stamp to verify which build is running
+const BUILD = 'v1.3';   // visible stamp to verify which build is running
 const cv = document.getElementById('game');
 const g = cv.getContext('2d');
 const W = cv.width, H = cv.height;
 const FLOORY = H - 64;      // fruit that gets this far past him splats
 const GROUND = FLOORY + 12;
 const NX = W/2, NY = H - 90;// the ninja runs in place at the bottom edge
+const COOLDOWN = 700;       // ms to nock a fresh arrow — no spamming
 const BOWR = 55;            // the bow pivots close to his body
 const DRAW = BOWR - 12;     // full pull brings the nock right back to his chest
 const ALEN   = 95;          // arrow length, tip to nock
@@ -38,6 +39,7 @@ const COLOR = {apple:'#e05d4f', orange:'#f2a24b', lemon:'#f2d54b', melon:'#e05d4
 let state, fruits, arrows, pops, bits, splats, booms, bow, spawnT, shotsFired, started;
 let floorScroll = 0;   // how far the dojo floor has slid past under the running ninja
 let shake = 0;         // screen shake from fruit detonations
+let lastFire = -9999;  // timestamp of the last shot, for the rearm cooldown
 
 // haptics: Capacitor native plugin on iOS, vibration API elsewhere, no-op in plain browsers
 const HapticsPlugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Haptics;
@@ -53,6 +55,7 @@ function reset(){
   bow = {ang:-Math.PI/2, pull:0, aiming:false};
   spawnT = 400; shotsFired = 0;
   started = false;   // fruit waits for the first touch
+  lastFire = -9999;
 }
 reset();
 
@@ -100,7 +103,8 @@ cv.addEventListener('pointermove', e=>{
 });
 function release(){
   if(!bow.aiming) return;
-  if(bow.pull > 0.12){
+  if(bow.pull > 0.12 && performance.now() - lastFire >= COOLDOWN){
+    lastFire = performance.now();
     const sp = 20;                       // every arrow flies at the same speed
     const dx = Math.cos(bow.ang), dy = Math.sin(bow.ang);
     const nockR = BOWR - bow.pull*DRAW;
@@ -403,8 +407,13 @@ function drawNinja(t){
   // headband knot at the back of his head
   shadeEllipse(0, 6, 4.2, 3.6, '#e06a60', '#9e3a36');
 
-  // nocked arrow, then string, limbs and grip on the pivot radius
-  g.save(); g.translate(0, -(nockR+ALEN)); arrowShaftLocal(); arrowTipLocal(); g.restore();
+  // nocked arrow fades back in while he pulls a fresh one from the quiver
+  const rearm = clamp((t - lastFire)/COOLDOWN, 0, 1);
+  if(rearm > 0.05){
+    g.save(); g.globalAlpha = rearm;
+    g.translate(0, -(nockR+ALEN)); arrowShaftLocal(); arrowTipLocal();
+    g.restore(); g.globalAlpha = 1;
+  }
   g.strokeStyle = '#6b6257'; g.lineWidth = 2;
   g.beginPath();
   g.moveTo(-56, -BOWR+4); g.lineTo(0, -nockR); g.lineTo(56, -BOWR+4);
