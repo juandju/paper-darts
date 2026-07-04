@@ -12,7 +12,7 @@
 <body>
 <canvas id="game" width="480" height="1040"></canvas>
 <script>
-const BUILD = 'v1.7';   // visible stamp to verify which build is running
+const BUILD = 'v1.8';   // visible stamp to verify which build is running
 const cv = document.getElementById('game');
 const g = cv.getContext('2d');
 const W = cv.width, H = cv.height;
@@ -40,6 +40,7 @@ let state, fruits, arrows, pops, bits, splats, booms, bow, spawnT, shotsFired, s
 let floorScroll = 0;   // how far the dojo floor has slid past under the running ninja
 let shake = 0;         // screen shake from fruit detonations
 let lastFire = -9999;  // timestamp of the last shot, for the rearm cooldown
+let gameT = 0;         // ms of actual play — difficulty ramps over this
 
 // haptics: Capacitor native plugin on iOS, vibration API elsewhere, no-op in plain browsers
 const HapticsPlugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Haptics;
@@ -54,18 +55,19 @@ function reset(){
   shake = 0;
   bow = {ang:-Math.PI/2, pull:0, aiming:false};
   spawnT = 400; shotsFired = 0;
-  started = false;   // fruit waits for the first touch
+  started = false;   // lives aren't at stake until the first shot
   lastFire = -9999;
+  gameT = 0;         // play clock driving the difficulty curve
 }
 reset();
 
 /* ---------------- spawning ---------------- */
-function spawnFruit(){
+function spawnFruit(diff){
   const type = TYPES[Math.floor(Math.random()*TYPES.length)];
   fruits.push({
     type, r:RAD[type],
     x: rnd(46, W-46), y: -40,
-    vx: rnd(-0.5,0.5), vy: rnd(0.9,1.5) + Math.min(1.2, state.score/400),
+    vx: rnd(-0.5,0.5), vy: rnd(0.55,0.95) + diff*1.1,   // gentle at first, quicker later
     rot: rnd(-0.4,0.4), vr: rnd(-0.02,0.02),
     skewered:false, dead:false
   });
@@ -119,16 +121,19 @@ cv.addEventListener('pointercancel', release);
 
 /* ---------------- update ---------------- */
 function update(k, dt){
+  if(started) gameT += dt;
+  const diff = clamp(gameT/90000, 0, 1);   // full difficulty after ~90s of play
+
   spawnT -= dt;
   if(spawnT <= 0){
-    spawnFruit();
-    spawnT = Math.max(560, 1150 - state.score*1.4) * rnd(0.8, 1.2);
+    spawnFruit(diff);
+    spawnT = (1600 - diff*950) * rnd(0.8, 1.2);   // sparse early, relentless late
   }
 
   // falling fruit
   for(const f of fruits){
     if(f.skewered || f.dead) continue;
-    f.vy += 0.02*k;
+    f.vy += (0.006 + diff*0.014)*k;
     f.y  += f.vy*k;
     f.x  += f.vx*k;
     f.rot+= f.vr*k;
