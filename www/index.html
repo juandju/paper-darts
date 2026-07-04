@@ -12,7 +12,7 @@
 <body>
 <canvas id="game" width="480" height="1040"></canvas>
 <script>
-const BUILD = 'v1.3';   // visible stamp to verify which build is running
+const BUILD = 'v1.4';   // visible stamp to verify which build is running
 const cv = document.getElementById('game');
 const g = cv.getContext('2d');
 const W = cv.width, H = cv.height;
@@ -575,6 +575,24 @@ function render(){
   g.fillStyle = 'rgba(253,244,221,.5)';
   g.font = '12px "Comic Sans MS","Chalkboard SE",cursive';
   g.fillText(BUILD, 16, H - 14);
+
+  // cooldown dial: the ring sweeps closed while he rearms, then the arrow lights up
+  const rearmP = clamp((performance.now() - lastFire)/COOLDOWN, 0, 1);
+  const ccx = 38, ccy = H - 52, ccr = 16;
+  g.fillStyle = 'rgba(30,18,8,.35)';
+  g.beginPath(); g.arc(ccx, ccy, ccr+5, 0, 7); g.fill();
+  // arrow glyph, dim while cooling
+  const ready = rearmP >= 1;
+  const pulse = ready ? 0.85 + Math.sin(performance.now()/180)*0.15 : 0.35;
+  g.strokeStyle = `rgba(253,244,221,${pulse})`; g.lineWidth = 3; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(ccx, ccy+8); g.lineTo(ccx, ccy-4); g.stroke();
+  g.fillStyle = `rgba(253,244,221,${pulse})`;
+  g.beginPath(); g.moveTo(ccx, ccy-10); g.lineTo(ccx-4.5, ccy-2); g.lineTo(ccx+4.5, ccy-2);
+  g.closePath(); g.fill();
+  // sweep ring
+  g.strokeStyle = ready ? `rgba(255,233,168,${pulse})` : 'rgba(253,244,221,.85)';
+  g.lineWidth = 3.5;
+  g.beginPath(); g.arc(ccx, ccy, ccr, -Math.PI/2, -Math.PI/2 + rearmP*Math.PI*2); g.stroke();
   for(let i=0;i<5;i++) heart(W-24 - i*28, 100, 2.2, i < state.lives);
 
   if(shotsFired === 0 && !state.over){
