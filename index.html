@@ -12,13 +12,13 @@
 <body>
 <canvas id="game" width="480" height="1040"></canvas>
 <script>
-const BUILD = 'v1.6';   // visible stamp to verify which build is running
+const BUILD = 'v1.7';   // visible stamp to verify which build is running
 const cv = document.getElementById('game');
 const g = cv.getContext('2d');
 const W = cv.width, H = cv.height;
 const FLOORY = H - 64;      // fruit that gets this far past him splats
 const GROUND = FLOORY + 12;
-const NX = W/2, NY = H - 90;// the ninja runs in place at the bottom edge
+const NX = W/2, NY = H - 62;// the ninja runs in place, hugging the bottom edge
 const COOLDOWN = 700;       // ms to nock a fresh arrow — no spamming
 const BOWR = 55;            // the bow pivots close to his body
 const DRAW = BOWR - 12;     // full pull brings the nock right back to his chest
