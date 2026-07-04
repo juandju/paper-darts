@@ -12,7 +12,7 @@
 <body>
 <canvas id="game" width="480" height="1040"></canvas>
 <script>
-const BUILD = 'v1.5';   // visible stamp to verify which build is running
+const BUILD = 'v1.6';   // visible stamp to verify which build is running
 const cv = document.getElementById('game');
 const g = cv.getContext('2d');
 const W = cv.width, H = cv.height;
@@ -160,7 +160,10 @@ function update(k, dt){
 
     for(const f of fruits){
       if(f.skewered || f.dead) continue;
-      if(segDist(f.x, f.y, px, py, a.x, a.y) <= f.r + 3){
+      // hitbox matches the altitude-scaled visual size, plus a forgiveness margin
+      const z = clamp((GROUND - f.y)/(GROUND + 40), 0, 1);
+      const hitR = f.r*(1 + z*0.45)*1.15 + 4;
+      if(segDist(f.x, f.y, px, py, a.x, a.y) <= hitR){
         f.skewered = true;
         buzz(f.type === 'melon' ? 'HEAVY' : 'MEDIUM');
         const target = Math.min(a.nextOff + f.r, ALEN - 14);
