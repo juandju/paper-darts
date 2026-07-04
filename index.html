@@ -12,7 +12,7 @@
 <body>
 <canvas id="game" width="480" height="1040"></canvas>
 <script>
-const BUILD = 'v1.4';   // visible stamp to verify which build is running
+const BUILD = 'v1.5';   // visible stamp to verify which build is running
 const cv = document.getElementById('game');
 const g = cv.getContext('2d');
 const W = cv.width, H = cv.height;
@@ -119,7 +119,6 @@ cv.addEventListener('pointercancel', release);
 
 /* ---------------- update ---------------- */
 function update(k, dt){
-  if(!started) return;
   spawnT -= dt;
   if(spawnT <= 0){
     spawnFruit();
@@ -137,10 +136,12 @@ function update(k, dt){
     if(f.y >= GROUND - f.r*0.4){          // splat!
       f.dead = true;
       splats.push({x:f.x, y:GROUND+5, r:f.r, c:COLOR[f.type], t:0});
-      state.lives--;
-      if(state.lives <= 0){
-        state.over = true;
-        if(state.score > state.best){ state.best = state.score; localStorage.pd_best = state.best; }
+      if(started){                        // grace: no lives lost before the first shot
+        state.lives--;
+        if(state.lives <= 0){
+          state.over = true;
+          if(state.score > state.best){ state.best = state.score; localStorage.pd_best = state.best; }
+        }
       }
     }
   }
